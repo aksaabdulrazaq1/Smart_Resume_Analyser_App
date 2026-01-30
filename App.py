@@ -1,13 +1,29 @@
 import streamlit as st
 import nltk
 import spacy
+import subprocess
+import sys
 nltk.download('stopwords')
-spacy.load('en_core_web_sm')
+
+# Try to load spaCy model, download if not available
+try:
+    spacy.load('en_core_web_sm')
+except OSError:
+    print("Downloading spaCy model...")
+    subprocess.check_call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+    spacy.load('en_core_web_sm')
 
 import pandas as pd
 import base64, random
 import time, datetime
-from pyresparser import ResumeParser
+try:
+    from pyresparser import ResumeParser
+    # disable pyresparser inside this environment because it expects bundled spaCy model/config
+    ResumeParser = None
+    print('pyresparser imported but disabled; using builtin fallback parser')
+except Exception:
+    ResumeParser = None
+    print('pyresparser not available or failing to import; falling back to simple parser')
 from pdfminer3.layout import LAParams, LTTextBox
 from pdfminer3.pdfpage import PDFPage
 from pdfminer3.pdfinterp import PDFResourceManager
@@ -17,14 +33,20 @@ import io, random
 from streamlit_tags import st_tags
 from PIL import Image
 import pymysql
+import os
 from Courses import ds_course, web_course, android_course, ios_course, uiux_course, resume_videos, interview_videos
 import pafy
 import plotly.express as px
 import youtube_dl
 
 def fetch_yt_video(link):
-    video = pafy.new(link)
-    return video.title
+    try:
+        video = pafy.new(link)
+        return video.title
+    except Exception as e:
+        # YouTube or pafy error — fallback to generic title
+        print(f'Video fetch failed: {e}')
+        return 'Video Title (fetch unavailable)'
 
 
 def get_table_download_link(df, filename, text):
@@ -66,6 +88,35 @@ def show_pdf(file_path):
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 
+def simple_resume_parser(file_path):
+    import re
+    text = pdf_reader(file_path)
+    email = ''
+    phone = ''
+    # email
+    m = re.search(r"[\w\.-]+@[\w\.-]+", text)
+    if m:
+        email = m.group(0)
+    # phone (simple)
+    m = re.search(r"(\+?\d[\d\-\s]{7,}\d)", text)
+    if m:
+        phone = m.group(0)
+    # simple skills detection
+    skills_db = ['python','java','c++','c#','javascript','react','django','flask','tensorflow','pytorch','sql','excel','spark','hadoop','kotlin','swift','flutter','figma','photoshop']
+    found_skills = []
+    lower = text.lower()
+    for s in skills_db:
+        if s in lower:
+            found_skills.append(s)
+    return {
+        'name': '',
+        'email': email,
+        'mobile_number': phone,
+        'no_of_pages': 1,
+        'skills': found_skills
+    }
+
+
 def course_recommender(course_list):
     st.subheader("**Courses & Certificates🎓 Recommendations**")
     c = 0
@@ -81,18 +132,50 @@ def course_recommender(course_list):
     return rec_course
 
 
-connection = pymysql.connect(host='localhost', user='root', password='')
-cursor = connection.cursor()
+connection = None
+cursor = None
+
+def establish_db_connection():
+    """Try to establish a connection to MySQL with multiple strategies"""
+    global connection, cursor
+    
+    connection_options = [
+        # Option 1: Unix socket
+        {'unix_socket': '/var/run/mysqld/mysqld.sock', 'user': 'root', 'password': '', 'database': 'resume_analyzer'},
+        # Option 2: Localhost with no password
+        {'host': 'localhost', 'user': 'root', 'password': '', 'database': 'resume_analyzer'},
+        # Option 3: Localhost with 'root' password
+        {'host': 'localhost', 'user': 'root', 'password': 'root', 'database': 'resume_analyzer'},
+        # Option 4: Environment variable password
+        {'host': 'localhost', 'user': 'root', 'password': os.environ.get('DB_PASSWORD', ''), 'database': 'resume_analyzer'},
+    ]
+    
+    for opts in connection_options:
+        try:
+            connection = pymysql.connect(**opts)
+            cursor = connection.cursor()
+            return True
+        except Exception:
+            continue
+    
+    # Silently fail if no connection available
+    return False
+
+# Attempt connection
+establish_db_connection()
 
 
 def insert_data(name, email, res_score, timestamp, no_of_pages, reco_field, cand_level, skills, recommended_skills,
                 courses):
     DB_table_name = 'user_data'
+    if cursor is None or connection is None:
+        print('DB not available — skipping insert_data')
+        return
     insert_sql = "insert into " + DB_table_name + """
     values (0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
     rec_values = (
-    name, email, str(res_score), timestamp, str(no_of_pages), reco_field, cand_level, skills, recommended_skills,
-    courses)
+        name, email, str(res_score), timestamp, str(no_of_pages), reco_field, cand_level, skills, recommended_skills,
+        courses)
     cursor.execute(insert_sql, rec_values)
     connection.commit()
 
@@ -114,10 +197,14 @@ def run():
     img = img.resize((250, 250))
     st.image(img)
 
-    # Create the DB
-    db_sql = """CREATE DATABASE IF NOT EXISTS SRA;"""
-    cursor.execute(db_sql)
-    connection.select_db("sra")
+    # Create the DB (using the pre-created resume_analyzer database)
+    db_sql = """CREATE DATABASE IF NOT EXISTS resume_analyzer;"""
+    if cursor is not None and connection is not None:
+        try:
+            cursor.execute(db_sql)
+            connection.select_db("resume_analyzer")
+        except Exception as e:
+            print(f"Note: Could not create/select database: {e}")
 
     # Create table
     DB_table_name = 'user_data'
@@ -135,7 +222,11 @@ def run():
                      Recommended_courses VARCHAR(600) NOT NULL,
                      PRIMARY KEY (ID));
                     """
-    cursor.execute(table_sql)
+    if cursor is not None and connection is not None:
+        try:
+            cursor.execute(table_sql)
+        except Exception as e:
+            print(f"Note: Could not create table: {e}")
     if choice == 'Normal User':
         # st.markdown('''<h4 style='text-align: left; color: #d73b5c;'>* Upload your resume, and get smart recommendation based on it."</h4>''',
         #             unsafe_allow_html=True)
@@ -147,7 +238,14 @@ def run():
             with open(save_image_path, "wb") as f:
                 f.write(pdf_file.getbuffer())
             show_pdf(save_image_path)
-            resume_data = ResumeParser(save_image_path).get_extracted_data()
+            resume_data = None
+            if ResumeParser is not None:
+                try:
+                    resume_data = ResumeParser(save_image_path).get_extracted_data()
+                except Exception as e:
+                    st.warning(f"pyresparser failed: {e}. Falling back to simple parser.")
+            if ResumeParser is None or resume_data is None:
+                resume_data = simple_resume_parser(save_image_path)
             if resume_data:
                 ## Get the whole resume data
                 resume_text = pdf_reader(save_image_path)
@@ -376,16 +474,23 @@ def run():
                 resume_vid = random.choice(resume_videos)
                 res_vid_title = fetch_yt_video(resume_vid)
                 st.subheader("✅ **" + res_vid_title + "**")
-                st.video(resume_vid)
+                try:
+                    st.video(resume_vid)
+                except Exception as e:
+                    st.warning(f"Could not load video: {e}")
 
                 ## Interview Preparation Video
                 st.header("**Bonus Video for Interview👨‍💼 Tips💡**")
                 interview_vid = random.choice(interview_videos)
                 int_vid_title = fetch_yt_video(interview_vid)
                 st.subheader("✅ **" + int_vid_title + "**")
-                st.video(interview_vid)
+                try:
+                    st.video(interview_vid)
+                except Exception as e:
+                    st.warning(f"Could not load video: {e}")
 
-                connection.commit()
+                if connection is not None:
+                    connection.commit()
             else:
                 st.error('Something went wrong..')
     else:
@@ -396,37 +501,37 @@ def run():
         ad_user = st.text_input("Username")
         ad_password = st.text_input("Password", type='password')
         if st.button('Login'):
-            if ad_user == 'machine_learning_hub' and ad_password == 'mlhub123':
-                st.success("Welcome Kushal")
+            if ad_user == 'aqsa' and ad_password == '1234':
+                st.success("Welcome aqsa")
                 # Display Data
-                cursor.execute('''SELECT*FROM user_data''')
-                data = cursor.fetchall()
-                st.header("**User's👨‍💻 Data**")
-                df = pd.DataFrame(data, columns=['ID', 'Name', 'Email', 'Resume Score', 'Timestamp', 'Total Page',
-                                                 'Predicted Field', 'User Level', 'Actual Skills', 'Recommended Skills',
-                                                 'Recommended Course'])
-                st.dataframe(df)
-                st.markdown(get_table_download_link(df, 'User_Data.csv', 'Download Report'), unsafe_allow_html=True)
-                ## Admin Side Data
-                query = 'select * from user_data;'
-                plot_data = pd.read_sql(query, connection)
+                if cursor is not None and connection is not None:
+                    cursor.execute('''SELECT*FROM user_data''')
+                    data = cursor.fetchall()
+                    st.header("**User's👨‍💻 Data**")
+                    df = pd.DataFrame(data, columns=['ID', 'Name', 'Email', 'Resume Score', 'Timestamp', 'Total Page',
+                                                     'Predicted Field', 'User Level', 'Actual Skills', 'Recommended Skills',
+                                                     'Recommended Course'])
+                    st.dataframe(df)
+                    st.markdown(get_table_download_link(df, 'User_Data.csv', 'Download Report'), unsafe_allow_html=True)
+                    ## Admin Side Data
+                    query = 'select * from user_data;'
+                    plot_data = pd.read_sql(query, connection)
 
-                ## Pie chart for predicted field recommendations
-                labels = plot_data.Predicted_Field.unique()
-                print(labels)
-                values = plot_data.Predicted_Field.value_counts()
-                print(values)
-                st.subheader("📈 **Pie-Chart for Predicted Field Recommendations**")
-                fig = px.pie(df, values=values, names=labels, title='Predicted Field according to the Skills')
-                st.plotly_chart(fig)
+                    ## Pie chart for predicted field recommendations
+                    labels = plot_data.Predicted_Field.unique()
+                    print(labels)
+                    values = plot_data.Predicted_Field.value_counts()
+                    print(values)
+                    st.subheader("📈 **Pie-Chart for Predicted Field Recommendations**")
+                    fig = px.pie(df, values=values, names=labels, title='Predicted Field according to the Skills')
+                    st.plotly_chart(fig)
 
-                ### Pie chart for User's👨‍💻 Experienced Level
-                labels = plot_data.User_level.unique()
-                values = plot_data.User_level.value_counts()
-                st.subheader("📈 ** Pie-Chart for User's👨‍💻 Experienced Level**")
-                fig = px.pie(df, values=values, names=labels, title="Pie-Chart📈 for User's👨‍💻 Experienced Level")
-                st.plotly_chart(fig)
-
+                    ### Pie chart for User's👨‍💻 Experienced Level
+                    labels = plot_data.User_level.unique()
+                    values = plot_data.User_level.value_counts()
+                    st.subheader("📈 ** Pie-Chart for User's👨‍💻 Experienced Level**")
+                    fig = px.pie(df, values=values, names=labels, title="Pie-Chart📈 for User's👨‍💻 Experienced Level")
+                    st.plotly_chart(fig)
 
             else:
                 st.error("Wrong ID & Password Provided")
