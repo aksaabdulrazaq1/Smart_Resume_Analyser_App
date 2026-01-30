@@ -93,14 +93,33 @@ def simple_resume_parser(file_path):
     text = pdf_reader(file_path)
     email = ''
     phone = ''
+    name = ''
+    
+    # Extract name - typically the first non-empty line or first capitalized word(s)
+    lines = text.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if line and len(line) > 2:  # Skip very short lines
+            # Try to extract name from first substantial line (usually all caps or title case)
+            words = line.split()
+            if len(words) >= 1:
+                # Filter out common non-name words
+                non_name_keywords = ['email', 'phone', 'mobile', 'contact', 'linkedin', 'github', 'http', 'www', 'address', 'objective', 'summary']
+                is_likely_name = not any(keyword.lower() in line.lower() for keyword in non_name_keywords)
+                if is_likely_name and len(words) <= 4:  # Names typically have 1-4 words
+                    name = line
+                    break
+    
     # email
     m = re.search(r"[\w\.-]+@[\w\.-]+", text)
     if m:
         email = m.group(0)
+    
     # phone (simple)
     m = re.search(r"(\+?\d[\d\-\s]{7,}\d)", text)
     if m:
         phone = m.group(0)
+    
     # simple skills detection
     skills_db = ['python','java','c++','c#','javascript','react','django','flask','tensorflow','pytorch','sql','excel','spark','hadoop','kotlin','swift','flutter','figma','photoshop']
     found_skills = []
@@ -108,10 +127,11 @@ def simple_resume_parser(file_path):
     for s in skills_db:
         if s in lower:
             found_skills.append(s)
+    
     return {
-        'name': '',
-        'email': email,
-        'mobile_number': phone,
+        'name': name if name else 'Candidate',
+        'email': email if email else 'Not found',
+        'mobile_number': phone if phone else 'Not found',
         'no_of_pages': 1,
         'skills': found_skills
     }
@@ -181,13 +201,13 @@ def insert_data(name, email, res_score, timestamp, no_of_pages, reco_field, cand
 
 
 st.set_page_config(
-    page_title="Smart Resume Analyzer",
-    page_icon='./Logo/SRA_Logo.ico',
+    page_title="Resume Screening",
+    page_icon='./Logo/LOGO.png',
 )
 
 
 def run():
-    st.title("Smart Resume Analyser")
+    st.title("Resume Screening")
     st.sidebar.markdown("# Choose User")
     activities = ["Normal User", "Admin"]
     choice = st.sidebar.selectbox("Choose among the given options:", activities)
@@ -251,15 +271,22 @@ def run():
                 resume_text = pdf_reader(save_image_path)
 
                 st.header("**Resume Analysis**")
-                st.success("Hello " + resume_data['name'])
+                st.success("Hello " + (resume_data['name'] if resume_data.get('name') else 'Candidate'))
                 st.subheader("**Your Basic info**")
                 try:
-                    st.text('Name: ' + resume_data['name'])
-                    st.text('Email: ' + resume_data['email'])
-                    st.text('Contact: ' + resume_data['mobile_number'])
-                    st.text('Resume pages: ' + str(resume_data['no_of_pages']))
-                except:
-                    pass
+                    name_display = resume_data.get('name', 'Not found').strip() if resume_data.get('name') else 'Not found'
+                    email_display = resume_data.get('email', 'Not found').strip() if resume_data.get('email') else 'Not found'
+                    phone_display = resume_data.get('mobile_number', 'Not found').strip() if resume_data.get('mobile_number') else 'Not found'
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**Name:** {name_display}")
+                        st.markdown(f"**Email:** {email_display}")
+                    with col2:
+                        st.markdown(f"**Contact:** {phone_display}")
+                        st.markdown(f"**Resume pages:** {resume_data.get('no_of_pages', 1)}")
+                except Exception as e:
+                    st.warning(f"Could not display basic info: {e}")
                 cand_level = ''
                 if resume_data['no_of_pages'] == 1:
                     cand_level = "Fresher"
